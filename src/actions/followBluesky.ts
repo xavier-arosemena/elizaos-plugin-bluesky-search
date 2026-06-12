@@ -17,7 +17,8 @@
 
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
-import { batchFollowUsers, followUser, unfollowUser, getFollows, ensureSession, getSessionDid } from "../lib/blueskyClient.js";
+import { batchFollowUsers, ensureSession } from "../lib/blueskyClient.js";
+import { loadState, saveState, getToday, resetDailyCounter } from "../lib/stateStore.js";
 import type { FollowConfig, FollowState, FollowCycleResult } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -26,35 +27,6 @@ import type { FollowConfig, FollowState, FollowCycleResult } from "../types.js";
 
 const DEFAULT_MAX_DAILY = 30;
 const STATE_FILE = "data/bluesky_follow_state.json";
-
-// ---------------------------------------------------------------------------
-// State persistence
-// ---------------------------------------------------------------------------
-
-function loadFollowState(): FollowState | null {
-  try {
-    const fs = require("fs");
-    if (fs.existsSync(STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
-    }
-  } catch {}
-  return null;
-}
-
-function saveFollowState(state: FollowState): void {
-  try {
-    const fs = require("fs");
-    const dir = require("path").dirname(STATE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    elizaLogger.warn(`[BLUESKY-PLUGIN] followBluesky: failed to save state — ${err}`);
-  }
-}
-
-function getToday(): string {
-  return new Date().toISOString().split("T")[0];
-}
 
 // ---------------------------------------------------------------------------
 // Config Builder
@@ -75,6 +47,7 @@ export const followBlueskyAction: Action = {
   name: "FOLLOW_BLUESKY",
   similes: ["FOLLOW_BLUESKY", "FOLLOW_USER_BLUESKY"],
   description: "Follow Bluesky users from Scout watchlist with daily budget tracking.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const config = buildConfig(runtime);
@@ -106,17 +79,14 @@ export const followBlueskyAction: Action = {
       await ensureSession(handle, appPassword);
 
       // Load state and check budget
-      const followState = loadFollowState() || {
-        lastFollowAt: "",
-        todayCount: 0,
-        todayDate: getToday(),
-        followedDids: [],
-      };
-
-      if (followState.todayDate !== getToday()) {
-        followState.todayCount = 0;
-        followState.todayDate = getToday();
-      }
+      const followState = resetDailyCounter(
+        loadState<FollowState>(STATE_FILE) || {
+          lastFollowAt: "",
+          todayCount: 0,
+          todayDate: getToday(),
+          followedDids: [],
+        }
+      );
 
       if (followState.todayCount >= config.maxPerDay) {
         elizaLogger.info(
@@ -166,7 +136,7 @@ export const followBlueskyAction: Action = {
       followState.todayCount += followed;
       followState.lastFollowAt = new Date().toISOString();
       followState.followedDids.push(...toFollow.slice(0, followed));
-      saveFollowState(followState);
+      saveState(STATE_FILE, followState);
 
       const result: FollowCycleResult = {
         followed,

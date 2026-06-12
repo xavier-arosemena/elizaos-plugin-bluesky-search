@@ -165,178 +165,130 @@ function xrpcHeaders(): Record<string, string> {
   };
 }
 
+interface XrpcFetchOptions {
+  method: "GET" | "POST";
+  nsid: string;
+  /** Query params (GET only) */
+  params?: Record<string, any>;
+  /** Request body (POST only) */
+  body?: unknown;
+}
+
 /**
- * Generic XRPC GET request with auto-refresh on 401.
+ * Core XRPC fetch with automatic 401 refresh and 429 rate-limit retry.
+ * Shared by both xrpcGet and xrpcPost to eliminate code duplication.
  */
-async function xrpcGet<T>(nsid: string, params?: Record<string, any>): Promise<T | null> {
+async function xrpcFetch<T>(options: XrpcFetchOptions): Promise<T | null> {
+  const { method, nsid, params, body } = options;
+
   if (!_session?.accessJwt) {
     elizaLogger.warn(`[BLUESKY-PLUGIN] blueskyClient: no session — call ensureSession first`);
     return null;
   }
 
-  const url = new URL(`${BSKY_XRPC}/${nsid}`);
-  if (params) {
-    Object.entries(params).forEach(([k, v]) => {
-      if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
-    });
+  // Build URL (query params for GET)
+  const url = method === "GET"
+    ? (() => {
+        const u = new URL(`${BSKY_XRPC}/${nsid}`);
+        if (params) {
+          Object.entries(params).forEach(([k, v]) => {
+            if (v !== undefined && v !== null) u.searchParams.set(k, String(v));
+          });
+        }
+        return u.toString();
+      })()
+    : `${BSKY_XRPC}/${nsid}`;
+
+  // Build fetch init
+  const init: RequestInit & { signal: AbortSignal } = {
+    method,
+    headers: xrpcHeaders(),
+    signal: AbortSignal.timeout(15_000),
+  };
+  if (body && method === "POST") {
+    init.body = JSON.stringify(body);
   }
 
   const startTime = Date.now();
+  const methodLabel = method;
+
   try {
-    const res = await fetch(url.toString(), {
-      method: "GET",
-      headers: xrpcHeaders(),
-      signal: AbortSignal.timeout(15_000),
-    });
+    let res = await fetch(url, init);
 
     // Auto-refresh on 401 and retry once
     if (res.status === 401) {
       elizaLogger.warn(`[BLUESKY-PLUGIN] blueskyClient: 401 on ${nsid} — refreshing session`);
       await refreshSession();
       if (!_session?.accessJwt) return null;
-      const retryRes = await fetch(url.toString(), {
-        method: "GET",
-        headers: xrpcHeaders(),
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!retryRes.ok) {
+      init.headers = xrpcHeaders();
+      res = await fetch(url, init);
+      if (!res.ok) {
         elizaLogger.warn(
-          `[BLUESKY-PLUGIN] blueskyClient: GET ${nsid} retry FAILED — ${retryRes.status}`
+          `[BLUESKY-PLUGIN] blueskyClient: ${methodLabel} ${nsid} retry FAILED — ${res.status}`
         );
         return null;
       }
-      const data = (await retryRes.json()) as T;
+      const data = (await res.json()) as T;
       elizaLogger.info(
-        `[BLUESKY-PLUGIN] blueskyClient: GET ${nsid} — ${Date.now() - startTime}ms (retry after refresh)`
+        `[BLUESKY-PLUGIN] blueskyClient: ${methodLabel} ${nsid} — ${Date.now() - startTime}ms (retry after refresh)`
       );
       return data;
     }
 
-    if (!res.ok) {
-      if (res.status === 429) {
-        elizaLogger.warn(
-          `[BLUESKY-PLUGIN] blueskyClient: GET ${nsid} rate-limited — backing off 2s`
-        );
-        await sleep(2000);
-        const retryRes = await fetch(url.toString(), {
-          method: "GET",
-          headers: xrpcHeaders(),
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (!retryRes.ok) {
-          elizaLogger.warn(
-            `[BLUESKY-PLUGIN] blueskyClient: GET ${nsid} rate-limit retry FAILED — ${retryRes.status}`
-          );
-          return null;
-        }
-        const data = (await retryRes.json()) as T;
-        elizaLogger.info(
-          `[BLUESKY-PLUGIN] blueskyClient: GET ${nsid} — ${Date.now() - startTime}ms (rate-limit retry)`
-        );
-        return data;
-      }
+    // Rate-limit retry
+    if (res.status === 429) {
       elizaLogger.warn(
-        `[BLUESKY-PLUGIN] blueskyClient: GET ${nsid} FAILED — ${res.status} after ${Date.now() - startTime}ms`
+        `[BLUESKY-PLUGIN] blueskyClient: ${methodLabel} ${nsid} rate-limited — backing off 2s`
+      );
+      await sleep(2000);
+      res = await fetch(url, init);
+      if (!res.ok) {
+        elizaLogger.warn(
+          `[BLUESKY-PLUGIN] blueskyClient: ${methodLabel} ${nsid} rate-limit retry FAILED — ${res.status}`
+        );
+        return null;
+      }
+      const data = (await res.json()) as T;
+      elizaLogger.info(
+        `[BLUESKY-PLUGIN] blueskyClient: ${methodLabel} ${nsid} — ${Date.now() - startTime}ms (rate-limit retry)`
+      );
+      return data;
+    }
+
+    // Other errors
+    if (!res.ok) {
+      elizaLogger.warn(
+        `[BLUESKY-PLUGIN] blueskyClient: ${methodLabel} ${nsid} FAILED — ${res.status} after ${Date.now() - startTime}ms`
       );
       return null;
     }
 
+    // Success
     const data = (await res.json()) as T;
     elizaLogger.info(
-      `[BLUESKY-PLUGIN] blueskyClient: GET ${nsid} — ${Date.now() - startTime}ms`
+      `[BLUESKY-PLUGIN] blueskyClient: ${methodLabel} ${nsid} — ${Date.now() - startTime}ms`
     );
     return data;
   } catch (err) {
     elizaLogger.warn(
-      `[BLUESKY-PLUGIN] blueskyClient: GET ${nsid} ERROR — ${err} after ${Date.now() - startTime}ms`
+      `[BLUESKY-PLUGIN] blueskyClient: ${methodLabel} ${nsid} ERROR — ${err} after ${Date.now() - startTime}ms`
     );
     return null;
   }
 }
 
 /**
- * Generic XRPC POST request with auto-refresh on 401.
+ * Generic XRPC GET request (delegates to xrpcFetch for retry logic).
  */
-async function xrpcPost<T>(nsid: string, body: any): Promise<T | null> {
-  if (!_session?.accessJwt) {
-    elizaLogger.warn(`[BLUESKY-PLUGIN] blueskyClient: no session — call ensureSession first`);
-    return null;
-  }
+async function xrpcGet<T>(nsid: string, params?: Record<string, any>): Promise<T | null> {
+  return xrpcFetch<T>({ method: "GET", nsid, params });
+}
 
-  const startTime = Date.now();
-  try {
-    const res = await fetch(`${BSKY_XRPC}/${nsid}`, {
-      method: "POST",
-      headers: xrpcHeaders(),
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(15_000),
-    });
-
-    // Auto-refresh on 401 and retry once
-    if (res.status === 401) {
-      elizaLogger.warn(`[BLUESKY-PLUGIN] blueskyClient: 401 on ${nsid} — refreshing session`);
-      await refreshSession();
-      if (!_session?.accessJwt) return null;
-      const retryRes = await fetch(`${BSKY_XRPC}/${nsid}`, {
-        method: "POST",
-        headers: xrpcHeaders(),
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(15_000),
-      });
-      if (!retryRes.ok) {
-        elizaLogger.warn(
-          `[BLUESKY-PLUGIN] blueskyClient: POST ${nsid} retry FAILED — ${retryRes.status}`
-        );
-        return null;
-      }
-      const data = (await retryRes.json()) as T;
-      elizaLogger.info(
-        `[BLUESKY-PLUGIN] blueskyClient: POST ${nsid} — ${Date.now() - startTime}ms (retry after refresh)`
-      );
-      return data;
-    }
-
-    if (!res.ok) {
-      if (res.status === 429) {
-        elizaLogger.warn(
-          `[BLUESKY-PLUGIN] blueskyClient: POST ${nsid} rate-limited — backing off 2s`
-        );
-        await sleep(2000);
-        const retryRes = await fetch(`${BSKY_XRPC}/${nsid}`, {
-          method: "POST",
-          headers: xrpcHeaders(),
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (!retryRes.ok) {
-          elizaLogger.warn(
-            `[BLUESKY-PLUGIN] blueskyClient: POST ${nsid} rate-limit retry FAILED — ${retryRes.status}`
-          );
-          return null;
-        }
-        const data = (await retryRes.json()) as T;
-        elizaLogger.info(
-          `[BLUESKY-PLUGIN] blueskyClient: POST ${nsid} — ${Date.now() - startTime}ms (rate-limit retry)`
-        );
-        return data;
-      }
-      elizaLogger.warn(
-        `[BLUESKY-PLUGIN] blueskyClient: POST ${nsid} FAILED — ${res.status} after ${Date.now() - startTime}ms`
-      );
-      return null;
-    }
-
-    const data = (await res.json()) as T;
-    elizaLogger.info(
-      `[BLUESKY-PLUGIN] blueskyClient: POST ${nsid} — ${Date.now() - startTime}ms`
-    );
-    return data;
-  } catch (err) {
-    elizaLogger.warn(
-      `[BLUESKY-PLUGIN] blueskyClient: POST ${nsid} ERROR — ${err} after ${Date.now() - startTime}ms`
-    );
-    return null;
-  }
+/**
+ * Generic XRPC POST request (delegates to xrpcFetch for retry logic).
+ */
+async function xrpcPost<T>(nsid: string, body?: unknown): Promise<T | null> {
+  return xrpcFetch<T>({ method: "POST", nsid, body });
 }
 
 // ==========================================================================
@@ -646,6 +598,35 @@ export async function batchFollowUsers(dids: string[]): Promise<number> {
     await sleep(500 + Math.random() * 1000);
   }
   return successCount;
+}
+
+// ==========================================================================
+// Record Listing (for unfollow support)
+// ==========================================================================
+
+/**
+ * List follow records created by the authenticated user.
+ * GET /com.atproto.repo.listRecords?repo=DID&collection=app.bsky.graph.follow&limit=LIMIT
+ *
+ * Returns an array of { uri, cid, subject } where subject is the DID being followed.
+ */
+export async function listFollowRecords(
+  limit = 100
+): Promise<Array<{ uri: string; cid: string; subject: string }>> {
+  if (!_session?.did) return [];
+
+  const data = await xrpcGet<any>("com.atproto.repo.listRecords", {
+    repo: _session.did,
+    collection: "app.bsky.graph.follow",
+    limit,
+  });
+
+  if (!data?.records) return [];
+  return data.records.map((r: any) => ({
+    uri: r.uri,
+    cid: r.cid,
+    subject: r.value?.subject ?? "",
+  }));
 }
 
 // ==========================================================================

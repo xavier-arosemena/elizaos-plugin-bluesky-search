@@ -19,6 +19,7 @@
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
 import { batchLikePosts, ensureSession } from "../lib/blueskyClient.js";
+import { loadState, saveState, getToday, resetDailyCounter } from "../lib/stateStore.js";
 import type { LikeConfig, LikeState, LikeCycleResult } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -28,35 +29,6 @@ import type { LikeConfig, LikeState, LikeCycleResult } from "../types.js";
 const DEFAULT_MAX_DAILY = 50;
 const DEFAULT_BATCH_SIZE = 10;
 const STATE_FILE = "data/bluesky_like_state.json";
-
-// ---------------------------------------------------------------------------
-// State persistence
-// ---------------------------------------------------------------------------
-
-function loadLikeState(): LikeState | null {
-  try {
-    const fs = require("fs");
-    if (fs.existsSync(STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
-    }
-  } catch {}
-  return null;
-}
-
-function saveLikeState(state: LikeState): void {
-  try {
-    const fs = require("fs");
-    const dir = require("path").dirname(STATE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    elizaLogger.warn(`[BLUESKY-PLUGIN] likeBluesky: failed to save state — ${err}`);
-  }
-}
-
-function getToday(): string {
-  return new Date().toISOString().split("T")[0];
-}
 
 // ---------------------------------------------------------------------------
 // Config Builder
@@ -78,6 +50,7 @@ export const likeBlueskyAction: Action = {
   name: "LIKE_BLUESKY",
   similes: ["LIKE_BLUESKY", "BATCH_LIKE_BLUESKY"],
   description: "Batch like Bluesky posts with daily budget tracking and dedup.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const config = buildConfig(runtime);
@@ -109,18 +82,14 @@ export const likeBlueskyAction: Action = {
       await ensureSession(handle, appPassword);
 
       // Load state and check budget
-      const state = loadLikeState() || {
-        lastLikeAt: "",
-        todayCount: 0,
-        todayDate: getToday(),
-        likedUris: [],
-      };
-
-      // Reset daily counter if new day
-      if (state.todayDate !== getToday()) {
-        state.todayCount = 0;
-        state.todayDate = getToday();
-      }
+      const state = resetDailyCounter(
+        loadState<LikeState>(STATE_FILE) || {
+          lastLikeAt: "",
+          todayCount: 0,
+          todayDate: getToday(),
+          likedUris: [],
+        }
+      );
 
       // Check budget
       if (state.todayCount >= config.maxPerDay) {
@@ -182,7 +151,7 @@ export const likeBlueskyAction: Action = {
       state.todayCount += liked;
       state.lastLikeAt = new Date().toISOString();
       state.likedUris.push(...toLike.map((t) => t.uri));
-      saveLikeState(state);
+      saveState(STATE_FILE, state);
 
       const result: LikeCycleResult = {
         liked,

@@ -18,6 +18,7 @@
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
 import { replyToPost, getPostThread, ensureSession } from "../lib/blueskyClient.js";
+import { loadState, saveState, getToday, resetDailyCounter } from "../lib/stateStore.js";
 import type { ReplyConfig, ReplyState, ReplyCycleResult, ReplyTarget } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -26,35 +27,6 @@ import type { ReplyConfig, ReplyState, ReplyCycleResult, ReplyTarget } from "../
 
 const DEFAULT_MAX_DAILY = 10;
 const STATE_FILE = "data/bluesky_reply_state.json";
-
-// ---------------------------------------------------------------------------
-// State persistence
-// ---------------------------------------------------------------------------
-
-function loadReplyState(): ReplyState | null {
-  try {
-    const fs = require("fs");
-    if (fs.existsSync(STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
-    }
-  } catch {}
-  return null;
-}
-
-function saveReplyState(state: ReplyState): void {
-  try {
-    const fs = require("fs");
-    const dir = require("path").dirname(STATE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    elizaLogger.warn(`[BLUESKY-PLUGIN] replyBluesky: failed to save state — ${err}`);
-  }
-}
-
-function getToday(): string {
-  return new Date().toISOString().split("T")[0];
-}
 
 // ---------------------------------------------------------------------------
 // Config Builder
@@ -75,6 +47,7 @@ export const replyBlueskyAction: Action = {
   name: "REPLY_BLUESKY",
   similes: ["REPLY_BLUESKY", "REPLY_POST_BLUESKY"],
   description: "Reply to Bluesky posts identified by the Scout with data-backed commentary.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const config = buildConfig(runtime);
@@ -106,16 +79,13 @@ export const replyBlueskyAction: Action = {
       await ensureSession(handle, appPassword);
 
       // Load state and check budget
-      const replyState = loadReplyState() || {
-        lastReplyAt: "",
-        todayCount: 0,
-        todayDate: getToday(),
-      };
-
-      if (replyState.todayDate !== getToday()) {
-        replyState.todayCount = 0;
-        replyState.todayDate = getToday();
-      }
+      const replyState = resetDailyCounter(
+        loadState<ReplyState>(STATE_FILE) || {
+          lastReplyAt: "",
+          todayCount: 0,
+          todayDate: getToday(),
+        }
+      );
 
       if (replyState.todayCount >= config.maxPerDay) {
         elizaLogger.info(
@@ -163,9 +133,6 @@ export const replyBlueskyAction: Action = {
       const remaining = config.maxPerDay - replyState.todayCount;
       const toReply = targets.slice(0, remaining);
 
-      // Since we need LLM-generated reply text, we check if the message
-      // already contains generated content from the handler context
-      // If not, we use a template approach for now
       let replied = 0;
       const errors: string[] = [];
 
@@ -206,7 +173,7 @@ export const replyBlueskyAction: Action = {
       // Update state
       replyState.todayCount += replied;
       replyState.lastReplyAt = new Date().toISOString();
-      saveReplyState(replyState);
+      saveState(STATE_FILE, replyState);
 
       const result: ReplyCycleResult = { replied, errors };
 

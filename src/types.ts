@@ -244,3 +244,10 @@ export interface FollowCycleResult {
   unfollowed: number;
   errors: string[];
 }
+
+/** State for unfollow (reciprocal check) actions */
+export interface UnfollowState {
+  lastUnfollowCycle: string;
+  unfollowCount: number;
+  unfollowedDids: string[];
+}
