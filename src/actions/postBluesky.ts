@@ -20,6 +20,7 @@
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
 import { createPost, ensureSession } from "../lib/blueskyClient.js";
+import { loadState, saveState, getToday, resetDailyCounter } from "../lib/stateStore.js";
 import type { PostConfig, PostState } from "../types.js";
 
 // ---------------------------------------------------------------------------
@@ -30,35 +31,6 @@ const DEFAULT_MAX_DAILY = 5;
 const DEFAULT_MIN_INTERVAL_MIN = 60;
 const DEFAULT_MAX_THREAD_POSTS = 5;
 const STATE_FILE = "data/bluesky_post_state.json";
-
-// ---------------------------------------------------------------------------
-// State persistence
-// ---------------------------------------------------------------------------
-
-function loadPostState(): PostState | null {
-  try {
-    const fs = require("fs");
-    if (fs.existsSync(STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
-    }
-  } catch {}
-  return null;
-}
-
-function savePostState(state: PostState): void {
-  try {
-    const fs = require("fs");
-    const dir = require("path").dirname(STATE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    elizaLogger.warn(`[BLUESKY-PLUGIN] postBluesky: failed to save state — ${err}`);
-  }
-}
-
-function getToday(): string {
-  return new Date().toISOString().split("T")[0];
-}
 
 // ---------------------------------------------------------------------------
 // Config Builder
@@ -130,16 +102,13 @@ export const postBlueskyAction: Action = {
       await ensureSession(handle, appPassword);
 
       // Load state and check budget
-      const postState = loadPostState() || {
-        lastPostAt: "",
-        todayCount: 0,
-        todayDate: getToday(),
-      };
-
-      if (postState.todayDate !== getToday()) {
-        postState.todayCount = 0;
-        postState.todayDate = getToday();
-      }
+      const postState = resetDailyCounter(
+        loadState<PostState>(STATE_FILE) || {
+          lastPostAt: "",
+          todayCount: 0,
+          todayDate: getToday(),
+        }
+      );
 
       if (postState.todayCount >= config.maxPerDay) {
         elizaLogger.info(
@@ -289,7 +258,7 @@ export const postBlueskyAction: Action = {
       // Update state
       postState.todayCount += posted;
       postState.lastPostAt = new Date().toISOString();
-      savePostState(postState);
+      saveState(STATE_FILE, postState);
 
       const duration = Date.now() - startTime;
       elizaLogger.info(

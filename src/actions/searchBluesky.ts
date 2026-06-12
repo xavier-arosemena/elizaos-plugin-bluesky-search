@@ -19,6 +19,7 @@
 // Logging: All logs use [BLUESKY-PLUGIN] and [SEARCH] prefixes.
 // =============================================================================
 
+import { existsSync, readFileSync } from "fs";
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
 import {
@@ -26,12 +27,18 @@ import {
   getAuthorFeed,
   getTimeline,
   listNotifications,
+  getPostThread,
   buildPostUrl,
   ensureSession,
-  getSessionDid,
-  createSession,
 } from "../lib/blueskyClient.js";
-import type { PluginConfig, BlueskyPost, ScoredBlueskyPost, ScoutCycleState, MonitoredProfile } from "../types.js";
+import { loadState, saveState } from "../lib/stateStore.js";
+import type {
+  PluginConfig,
+  BlueskyPost,
+  ScoredBlueskyPost,
+  ScoutCycleState,
+  MonitoredProfile,
+} from "../types.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -69,33 +76,17 @@ const STATE_FILE = "data/bluesky_scout_state.json";
 // ---------------------------------------------------------------------------
 
 function loadScoutState(): ScoutCycleState | null {
-  try {
-    const fs = require("fs");
-    if (fs.existsSync(STATE_FILE)) {
-      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
-    }
-  } catch {
-    // File not found or parse error — start fresh
-  }
-  return null;
+  return loadState<ScoutCycleState>(STATE_FILE);
 }
 
 function saveScoutState(state: ScoutCycleState): void {
-  try {
-    const fs = require("fs");
-    const dir = require("path").dirname(STATE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (err) {
-    elizaLogger.warn(`[BLUESKY-PLUGIN] searchBluesky: failed to save state — ${err}`);
-  }
+  saveState<ScoutCycleState>(STATE_FILE, state);
 }
 
 function loadMonitoredProfiles(config: PluginConfig): MonitoredProfile[] {
   try {
-    const fs = require("fs");
-    if (fs.existsSync(config.targetListJsonPath)) {
-      return JSON.parse(fs.readFileSync(config.targetListJsonPath, "utf-8")).profiles ?? [];
+    if (existsSync(config.targetListJsonPath)) {
+      return JSON.parse(readFileSync(config.targetListJsonPath, "utf-8")).profiles ?? [];
     }
   } catch {
     // File not found — no monitored profiles
@@ -319,7 +310,7 @@ async function runTier3(
 
   for (const notif of relevantNotifs) {
     // Get the full post thread to understand context
-    const thread = await (await import("../lib/blueskyClient.js")).getPostThread(notif.uri);
+    const thread = await getPostThread(notif.uri);
     if (!thread?.thread?.post) continue;
 
     const post = thread.thread.post;
@@ -407,7 +398,6 @@ function formatQueue(scored: ScoredBlueskyPost[]): string {
   let output = `🌐 **Bluesky Scout Report** — ${scored.length} opportunities\n\n`;
 
   for (const post of scored) {
-    const platform = "Bluesky";
     output += `**${post.author.displayName || post.author.handle}** (@${post.author.handle})\n`;
     output += `Score: ${post.score}/10 | ♥ ${post.likeCount} | ♺ ${post.repostCount} | 💬 ${post.replyCount}\n`;
     output += `🔗 ${post.postUrl}\n`;

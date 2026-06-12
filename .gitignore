@@ -1,6 +1,10 @@
 node_modules/
 dist/
+*.tsbuildinfo
 *.env
 .env
 .env.*
 *.js.map
+data/
+*.log
+.DS_Store
