@@ -47,6 +47,7 @@ export const followBlueskyAction: Action = {
   name: "FOLLOW_BLUESKY",
   similes: ["FOLLOW_BLUESKY", "FOLLOW_USER_BLUESKY"],
   description: "Follow Bluesky users from Scout watchlist with daily budget tracking.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const config = buildConfig(runtime);

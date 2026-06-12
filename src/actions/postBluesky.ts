@@ -71,6 +71,7 @@ export const postBlueskyAction: Action = {
   name: "POST_BLUESKY",
   similes: ["POST_BLUESKY", "CREATE_POST_BLUESKY", "THREAD_BLUESKY"],
   description: "Create Bluesky posts (text, link cards, threads) autonomously.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const config = buildConfig(runtime);
@@ -235,7 +236,7 @@ export const postBlueskyAction: Action = {
         }
       } else if (isLinkCard) {
         // Link card post
-        const text = (typeof content === "string" ? JSON.parse(content).text : content.text).substring(0, 300);
+        const text = JSON.parse(content).text.substring(0, 300);
         const result = await createPost(text, { embed: linkEmbed });
         if (result) {
           posted++;

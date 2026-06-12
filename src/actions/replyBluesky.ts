@@ -47,6 +47,7 @@ export const replyBlueskyAction: Action = {
   name: "REPLY_BLUESKY",
   similes: ["REPLY_BLUESKY", "REPLY_POST_BLUESKY"],
   description: "Reply to Bluesky posts identified by the Scout with data-backed commentary.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const config = buildConfig(runtime);

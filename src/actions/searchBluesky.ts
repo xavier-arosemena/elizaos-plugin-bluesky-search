@@ -422,6 +422,7 @@ export const searchBlueskyAction: Action = {
     "Three-tier discovery for Bluesky: keyword search, feed/profile monitoring, " +
     "and notification polling. Scores and prioritizes engagement opportunities " +
     "for Archon Europae.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const handle = runtime.getSetting("BLUESKY_HANDLE");

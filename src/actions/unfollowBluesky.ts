@@ -46,6 +46,7 @@ export const unfollowBlueskyAction: Action = {
   name: "UNFOLLOW_BLUESKY",
   similes: ["UNFOLLOW_BLUESKY", "UNFOLLOW_USER_BLUESKY"],
   description: "Weekly reciprocal unfollow check for Bluesky. Unfollows users who don't follow back.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const enabled = runtime.getSetting("BLUESKY_UNFOLLOW_ENABLED") !== "false";

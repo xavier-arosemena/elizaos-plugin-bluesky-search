@@ -50,6 +50,7 @@ export const likeBlueskyAction: Action = {
   name: "LIKE_BLUESKY",
   similes: ["LIKE_BLUESKY", "BATCH_LIKE_BLUESKY"],
   description: "Batch like Bluesky posts with daily budget tracking and dedup.",
+  examples: [],
 
   validate: async (runtime: IAgentRuntime): Promise<boolean> => {
     const config = buildConfig(runtime);
