@@ -17,9 +17,11 @@
 
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
-import { batchFollowUsers, ensureSession } from "../lib/blueskyClient.js";
-import { loadState, saveState, getToday, resetDailyCounter } from "../lib/stateStore.js";
+import { batchFollowUsers, followUser, unfollowUser, getFollows, ensureSession, getSessionDid } from "../lib/blueskyClient.js";
 import type { FollowConfig, FollowState, FollowCycleResult } from "../types.js";
+import { popQueuedFollows } from "./actionQueue.js";
+import fs from "fs";
+import path from "path";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -27,6 +29,33 @@ import type { FollowConfig, FollowState, FollowCycleResult } from "../types.js";
 
 const DEFAULT_MAX_DAILY = 30;
 const STATE_FILE = "data/bluesky_follow_state.json";
+
+// ---------------------------------------------------------------------------
+// State persistence
+// ---------------------------------------------------------------------------
+
+function loadFollowState(): FollowState | null {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
+    }
+  } catch {}
+  return null;
+}
+
+function saveFollowState(state: FollowState): void {
+  try {
+    const dir = path.dirname(STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (err) {
+    elizaLogger.warn(`[BLUESKY-PLUGIN] followBluesky: failed to save state — ${err}`);
+  }
+}
+
+function getToday(): string {
+  return new Date().toISOString().split("T")[0];
+}
 
 // ---------------------------------------------------------------------------
 // Config Builder
@@ -79,14 +108,17 @@ export const followBlueskyAction: Action = {
       await ensureSession(handle, appPassword);
 
       // Load state and check budget
-      const followState = resetDailyCounter(
-        loadState<FollowState>(STATE_FILE) || {
-          lastFollowAt: "",
-          todayCount: 0,
-          todayDate: getToday(),
-          followedDids: [],
-        }
-      );
+      const followState = loadFollowState() || {
+        lastFollowAt: "",
+        todayCount: 0,
+        todayDate: getToday(),
+        followedDids: [],
+      };
+
+      if (followState.todayDate !== getToday()) {
+        followState.todayCount = 0;
+        followState.todayDate = getToday();
+      }
 
       if (followState.todayCount >= config.maxPerDay) {
         elizaLogger.info(
@@ -101,9 +133,20 @@ export const followBlueskyAction: Action = {
         return;
       }
 
-      // Get target DIDs from message context
+      // ---------------------------------------------------------------
+      // Get follow targets: Priority 1. Action queue > 2. Message text (LLM)
+      // ---------------------------------------------------------------
       const targetDids: string[] = [];
-      if (message?.content?.text) {
+
+      const queuedFollows = popQueuedFollows();
+      if (queuedFollows && queuedFollows.length > 0) {
+        // Targets came from action queue — script prepared them directly
+        targetDids.push(...queuedFollows);
+        elizaLogger.info(
+          `[BLUESKY-PLUGIN] followBluesky: using ${queuedFollows.length} queued follow targets`
+        );
+      } else if (message?.content?.text) {
+        // Fallback: Parse target DIDs from message text (LLM response)
         const lines = message.content.text.split("\n");
         for (const line of lines) {
           const did = line.trim();
@@ -136,7 +179,7 @@ export const followBlueskyAction: Action = {
       followState.todayCount += followed;
       followState.lastFollowAt = new Date().toISOString();
       followState.followedDids.push(...toFollow.slice(0, followed));
-      saveState(STATE_FILE, followState);
+      saveFollowState(followState);
 
       const result: FollowCycleResult = {
         followed,

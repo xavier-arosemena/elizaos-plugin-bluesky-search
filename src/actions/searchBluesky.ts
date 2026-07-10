@@ -524,8 +524,17 @@ export const searchBlueskyAction: Action = {
       );
 
       if (callback) {
+        // Include the full formatted scout report in the callback text so the
+        // shell script (bluesky_scout_cycle.sh) can capture it, validate it
+        // for actual discovery content (SCORE, [DELIVERY], at:// URIs), and
+        // persist it to a scout-discovery.md file for downstream pipelines.
+        // The /ingest endpoint handles RAG delivery; this text is for script-level parsing.
+        const reportHeader = `🌐 **Bluesky Scout Report** — ${topResults.length} opportunities found (${duration}ms)\n\n`;
+        const reportBody = topResults.length > 0 ? formatQueue(topResults) : "No relevant Bluesky content found this cycle.";
+        const callbackText = reportHeader + reportBody;
+
         callback({
-          text: `Bluesky scout cycle complete: ${topResults.length} opportunities found and delivered to Archon.`,
+          text: callbackText,
           content: {
             source: "bluesky_scout",
             cycleDuration: duration,

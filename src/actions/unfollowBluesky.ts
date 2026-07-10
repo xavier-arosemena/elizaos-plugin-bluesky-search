@@ -10,26 +10,19 @@
 //   3. Get Archon's following list
 //   4. Get Archon's followers list
 //   5. Find non-reciprocal follows (following but not followed back)
-//   6. Look up follow record URIs via listFollowRecords
-//   7. Unfollow in batches (staggered to avoid rate limits)
-//   8. Update state
-//   9. Return results via callback
+//   6. Unfollow in batches (staggered to avoid rate limits)
+//   7. Update state
+//   8. Return results via callback
 //
 // Logging: [BLUESKY-PLUGIN] unfollowBluesky: ...
 // =============================================================================
 
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
-import {
-  getFollows,
-  getFollowers,
-  unfollowUser,
-  listFollowRecords,
-  ensureSession,
-  getSessionDid,
-} from "../lib/blueskyClient.js";
-import { loadState, saveState } from "../lib/stateStore.js";
-import type { FollowConfig, UnfollowState } from "../types.js";
+import { getFollows, getFollowers, unfollowUser, ensureSession, getSessionDid } from "../lib/blueskyClient.js";
+import type { FollowConfig } from "../types.js";
+import fs from "fs";
+import path from "path";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -37,6 +30,35 @@ import type { FollowConfig, UnfollowState } from "../types.js";
 
 const DEFAULT_MAX_UNFOLLOWS = 20;
 const STATE_FILE = "data/bluesky_unfollow_state.json";
+
+// ---------------------------------------------------------------------------
+// State persistence
+// ---------------------------------------------------------------------------
+
+interface UnfollowState {
+  lastUnfollowCycle: string;
+  unfollowCount: number;
+  unfollowedDids: string[];
+}
+
+function loadUnfollowState(): UnfollowState | null {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
+    }
+  } catch {}
+  return null;
+}
+
+function saveUnfollowState(state: UnfollowState): void {
+  try {
+    const dir = path.dirname(STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (err) {
+    elizaLogger.warn(`[BLUESKY-PLUGIN] unfollowBluesky: failed to save state — ${err}`);
+  }
+}
 
 // ==========================================================================
 // Action Definition
@@ -80,8 +102,8 @@ export const unfollowBlueskyAction: Action = {
         throw new Error("No session DID available");
       }
 
-      // Load previous unfollow state
-      const unfollowState = loadState<UnfollowState>(STATE_FILE) || {
+      // Check if weekly cycle is due
+      const unfollowState = loadUnfollowState() || {
         lastUnfollowCycle: "",
         unfollowCount: 0,
         unfollowedDids: [],
@@ -137,13 +159,6 @@ export const unfollowBlueskyAction: Action = {
         return;
       }
 
-      // Look up follow records to get the record URIs needed for unfollow
-      const followRecords = await listFollowRecords(100);
-      const didToFollowRecord = new Map<string, string>();
-      for (const record of followRecords) {
-        didToFollowRecord.set(record.subject, record.uri);
-      }
-
       // Unfollow in batches (limited per cycle)
       const toUnfollow = nonReciprocal.slice(0, maxUnfollows);
       let unfollowed = 0;
@@ -153,24 +168,29 @@ export const unfollowBlueskyAction: Action = {
         // Skip already-unfollowed DIDs
         if (unfollowState.unfollowedDids.includes(user.did)) continue;
 
-        // Look up the follow record URI needed for the API call
-        const followRecordUri = didToFollowRecord.get(user.did);
-
-        if (!followRecordUri) {
-          elizaLogger.warn(
-            `[BLUESKY-PLUGIN] unfollowBluesky: no follow record found for @${user.handle} (${user.did}) — skipping`
-          );
-          continue;
-        }
-
-        const success = await unfollowUser(followRecordUri);
-        if (success) {
-          unfollowed++;
+        // Call unfollowUser with the follow record URI
+        // The followRecordUri was added to getFollows() return type for this purpose
+        if (user.followRecordUri) {
           elizaLogger.info(
-            `[BLUESKY-PLUGIN] unfollowBluesky: unfollowed @${user.handle} (${user.did})`
+            `[BLUESKY-PLUGIN] unfollowBluesky: unfollowing @${user.handle} (${user.did}) — ${user.followRecordUri}`
           );
+          const success = await unfollowUser(user.followRecordUri);
+          if (success) {
+            unfollowed++;
+            elizaLogger.info(
+              `[BLUESKY-PLUGIN] unfollowBluesky: unfollowed @${user.handle}`
+            );
+          } else {
+            errors.push(`Failed to unfollow @${user.handle}`);
+            elizaLogger.warn(
+              `[BLUESKY-PLUGIN] unfollowBluesky: failed to unfollow @${user.handle}`
+            );
+          }
         } else {
-          errors.push(`Failed to unfollow: ${user.handle} (${user.did})`);
+          elizaLogger.warn(
+            `[BLUESKY-PLUGIN] unfollowBluesky: no followRecordUri for @${user.handle} — skipping`
+          );
+          errors.push(`No follow record URI for @${user.handle}`);
         }
 
         // Small delay between operations to avoid rate limits
@@ -181,7 +201,7 @@ export const unfollowBlueskyAction: Action = {
       // Update state
       unfollowState.lastUnfollowCycle = new Date().toISOString();
       unfollowState.unfollowCount += unfollowed;
-      saveState(STATE_FILE, unfollowState);
+      saveUnfollowState(unfollowState);
 
       const duration = Date.now() - startTime;
       elizaLogger.info(

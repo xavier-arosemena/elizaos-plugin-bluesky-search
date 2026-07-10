@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.2.1] - 2025-07-10
+
+### Added
+- `actionQueue.ts` — Shared action queue module with `popQueuedPost()`, `popQueuedLikes()`, `popQueuedReply()`, `popQueuedFollows()` for script→handler coordination
+- `SEARCH_BLUESKY` callback now includes formatted scout report with `SCORE: N/10`, `[DELIVERY]`, and `at://` URIs — ROOT CAUSE fix for pipeline starvation
+- `blueskyClient.ts` — Comprehensive XRPC client expansion: `getPostThread()`, `getProfile()`, `getFollowers()`, `getFollows()`, `searchActors()`, `repostPost()`, `deleteRecord()`, `batchFollowUsers()`, session management (`getSessionDid`, `getSessionToken`, `clearSession`)
+- LLM-generated reply text in `REPLY_BLUESKY` via `generateText({ modelClass: ModelClass.SMALL })` — replaces hardcoded `target.text.substring(0, 300)`
+
+### Fixed
+- All 4 handler files (`likeBluesky.ts`, `replyBluesky.ts`, `followBluesky.ts`, `unfollowBluesky.ts`): replaced CJS `require("fs")`/`require("path")` with ESM `import fs from "fs"`/`import path from "path"` for module system consistency
+- `postBluesky.ts`: removed duplicated `ActionQueue` interface and 5 queue functions — now imports `popQueuedPost` from `./actionQueue.js`
+- `index.ts`: removed stale `listFollowRecords` re-export (function removed in blueskyClient refactor)
+
+## [0.2.0] - Not released (version bump only)
+
 ## [0.1.0] - 2025-01-01
 
 ### Added

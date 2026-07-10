@@ -73,6 +73,17 @@ Tier 3: Notification Polling
 
 Results are merged, deduplicated, ranked by score, and delivered to an Archon agent via the `/ingest` endpoint.
 
+### Action Queue Pattern
+
+The plugin implements an **action queue** (`actionQueue.ts`) that decouples shell scripts from plugin handlers:
+
+```
+Shell Script  ──write──>  bluesky_action_queue.json  ──read──>  Plugin Handler
+(bluesky_*_cycle.sh)     (action queue)                        (e.g., postBluesky.ts)
+```
+
+Each handler reads targets from the queue via `popQueuedPost()`, `popQueuedLikes()`, `popQueuedReply()`, or `popQueuedFollows()`, then processes them within daily budget limits. This bypasses the LLM content chain when the LLM would return only acknowledgment text instead of actionable content.
+
 ### State Persistence
 
 Each action maintains daily budget tracking via JSON state files in the `data/` directory:
