@@ -72,7 +72,6 @@ export {
   batchLikePosts,
   batchFollowUsers,
   buildPostUrl,
-  listFollowRecords,
 } from "./lib/blueskyClient.js";
 export type {
   BlueskyPost,

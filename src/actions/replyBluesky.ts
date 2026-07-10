@@ -16,10 +16,12 @@
 // =============================================================================
 
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
-import { elizaLogger } from "@elizaos/core";
+import { elizaLogger, generateText, ModelClass } from "@elizaos/core";
 import { replyToPost, getPostThread, ensureSession } from "../lib/blueskyClient.js";
-import { loadState, saveState, getToday, resetDailyCounter } from "../lib/stateStore.js";
 import type { ReplyConfig, ReplyState, ReplyCycleResult, ReplyTarget } from "../types.js";
+import { popQueuedReply } from "./actionQueue.js";
+import fs from "fs";
+import path from "path";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -27,6 +29,33 @@ import type { ReplyConfig, ReplyState, ReplyCycleResult, ReplyTarget } from "../
 
 const DEFAULT_MAX_DAILY = 10;
 const STATE_FILE = "data/bluesky_reply_state.json";
+
+// ---------------------------------------------------------------------------
+// State persistence
+// ---------------------------------------------------------------------------
+
+function loadReplyState(): ReplyState | null {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
+    }
+  } catch {}
+  return null;
+}
+
+function saveReplyState(state: ReplyState): void {
+  try {
+    const dir = path.dirname(STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (err) {
+    elizaLogger.warn(`[BLUESKY-PLUGIN] replyBluesky: failed to save state — ${err}`);
+  }
+}
+
+function getToday(): string {
+  return new Date().toISOString().split("T")[0];
+}
 
 // ---------------------------------------------------------------------------
 // Config Builder
@@ -79,13 +108,16 @@ export const replyBlueskyAction: Action = {
       await ensureSession(handle, appPassword);
 
       // Load state and check budget
-      const replyState = resetDailyCounter(
-        loadState<ReplyState>(STATE_FILE) || {
-          lastReplyAt: "",
-          todayCount: 0,
-          todayDate: getToday(),
-        }
-      );
+      const replyState = loadReplyState() || {
+        lastReplyAt: "",
+        todayCount: 0,
+        todayDate: getToday(),
+      };
+
+      if (replyState.todayDate !== getToday()) {
+        replyState.todayCount = 0;
+        replyState.todayDate = getToday();
+      }
 
       if (replyState.todayCount >= config.maxPerDay) {
         elizaLogger.info(
@@ -100,9 +132,26 @@ export const replyBlueskyAction: Action = {
         return;
       }
 
-      // Parse reply targets from message
+      // ---------------------------------------------------------------
+      // Get reply targets: Priority 1. Action queue > 2. Message text (LLM)
+      // ---------------------------------------------------------------
       const targets: ReplyTarget[] = [];
-      if (message?.content?.text) {
+
+      const queuedReply = popQueuedReply();
+      if (queuedReply) {
+        // Target came from action queue — script prepared it directly
+        targets.push({
+          uri: queuedReply.parentUri,
+          cid: queuedReply.parentCid,
+          text: queuedReply.text,
+          authorHandle: "",
+          authorDid: "",
+        });
+        elizaLogger.info(
+          `[BLUESKY-PLUGIN] replyBluesky: using queued reply target — ${queuedReply.parentUri}`
+        );
+      } else if (message?.content?.text) {
+        // Fallback: Parse reply targets from message text (LLM response)
         // Expected format: ROOT_URI|ROOT_CID|PARENT_URI|PARENT_CID|TEXT
         const lines = message.content.text.split("\n");
         for (const line of lines) {
@@ -133,6 +182,9 @@ export const replyBlueskyAction: Action = {
       const remaining = config.maxPerDay - replyState.todayCount;
       const toReply = targets.slice(0, remaining);
 
+      // Since we need LLM-generated reply text, we check if the message
+      // already contains generated content from the handler context
+      // If not, we use a template approach for now
       let replied = 0;
       const errors: string[] = [];
 
@@ -152,9 +204,29 @@ export const replyBlueskyAction: Action = {
         const root = post.record.reply?.root || { uri: target.uri, cid: target.cid };
         const parent = { uri: target.uri, cid: target.cid };
 
-        // The reply text should come from LLM generation in the handler template
-        // For now, we use the suggested text from the target
-        const replyText = target.text.substring(0, 300); // Bluesky 300-char limit
+        // Generate reply text — if the target provides text (from action queue), use it
+        // Otherwise, generate a contextual reply via the LLM using the post content
+        let replyText = target.text || "";
+        if (!replyText.trim()) {
+          try {
+            const originalPost = thread?.thread?.post?.record?.text || "";
+            if (originalPost) {
+              const generated = await generateText({
+                runtime,
+                context: `Generate a brief, insightful reply to this Bluesky post. Keep it under 250 characters. Be concise and substantive.\n\nOriginal post: "${originalPost}"`,
+                modelClass: ModelClass.SMALL,
+              });
+              replyText = (generated?.trim() || "Interesting perspective!").substring(0, 300);
+            } else {
+              replyText = "Interesting perspective!";
+            }
+          } catch {
+            elizaLogger.warn(`[BLUESKY-PLUGIN] replyBluesky: LLM generation failed, using fallback text`);
+            replyText = target.text ? target.text.substring(0, 300) : "Interesting perspective!";
+          }
+        } else {
+          replyText = replyText.substring(0, 300); // Bluesky 300-char limit
+        }
 
         const result = await replyToPost(replyText, root, parent);
         if (result) {
@@ -173,7 +245,7 @@ export const replyBlueskyAction: Action = {
       // Update state
       replyState.todayCount += replied;
       replyState.lastReplyAt = new Date().toISOString();
-      saveState(STATE_FILE, replyState);
+      saveReplyState(replyState);
 
       const result: ReplyCycleResult = { replied, errors };
 

@@ -1,6 +1,6 @@
 {
   "name": "elizaos-plugin-bluesky-search",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Bluesky engagement discovery, post, like, reply, and follow/unfollow actions via AT Protocol XRPC API for ElizaOS agents",
   "type": "module",
   "main": "./dist/index.js",

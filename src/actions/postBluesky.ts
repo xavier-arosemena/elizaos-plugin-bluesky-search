@@ -7,7 +7,7 @@
 // Flow:
 //   1. Build PostConfig from runtime settings
 //   2. Load PostState from disk, check daily budget
-//   3. Get post content from message context
+//   3. Get post content from message context or action queue
 //   4. If thread content (multiple segments), create post chain
 //   5. If link embed, format external embed
 //   6. Post via createPost
@@ -20,8 +20,10 @@
 import type { Action, IAgentRuntime, Memory, State, HandlerCallback } from "@elizaos/core";
 import { elizaLogger } from "@elizaos/core";
 import { createPost, ensureSession } from "../lib/blueskyClient.js";
-import { loadState, saveState, getToday, resetDailyCounter } from "../lib/stateStore.js";
 import type { PostConfig, PostState } from "../types.js";
+import fs from "fs";
+import path from "path";
+import { popQueuedPost } from "./actionQueue.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -32,7 +34,39 @@ const DEFAULT_MIN_INTERVAL_MIN = 60;
 const DEFAULT_MAX_THREAD_POSTS = 5;
 const STATE_FILE = "data/bluesky_post_state.json";
 
+// Shared action queue — scripts write pre-formatted content here
+// to bypass the LLM content-generation chain (see bluesky_post_cycle.sh)
+const ACTION_QUEUE_FILE = "data/bluesky_action_queue.json";
+
 // ---------------------------------------------------------------------------
+// State persistence
+// ---------------------------------------------------------------------------
+
+function loadPostState(): PostState | null {
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      return JSON.parse(fs.readFileSync(STATE_FILE, "utf-8"));
+    }
+  } catch {}
+  return null;
+}
+
+function savePostState(state: PostState): void {
+  try {
+    const dir = path.dirname(STATE_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (err) {
+    elizaLogger.warn(`[BLUESKY-PLUGIN] postBluesky: failed to save state — ${err}`);
+  }
+}
+
+function getToday(): string {
+  return new Date().toISOString().split("T")[0];
+}
+
+// ---------------------------------------------------------------------------
+// Action queue read is imported from ./actionQueue.js (popQueuedPost)
 // Config Builder
 // ---------------------------------------------------------------------------
 
@@ -103,13 +137,16 @@ export const postBlueskyAction: Action = {
       await ensureSession(handle, appPassword);
 
       // Load state and check budget
-      const postState = resetDailyCounter(
-        loadState<PostState>(STATE_FILE) || {
-          lastPostAt: "",
-          todayCount: 0,
-          todayDate: getToday(),
-        }
-      );
+      const postState = loadPostState() || {
+        lastPostAt: "",
+        todayCount: 0,
+        todayDate: getToday(),
+      };
+
+      if (postState.todayDate !== getToday()) {
+        postState.todayCount = 0;
+        postState.todayDate = getToday();
+      }
 
       if (postState.todayCount >= config.maxPerDay) {
         elizaLogger.info(
@@ -142,27 +179,49 @@ export const postBlueskyAction: Action = {
         }
       }
 
-      // Parse content from message
-      // Expected format options:
-      //   1. Simple text: just post the text
-      //   2. Thread: segments separated by "---THREAD_SEPARATOR---"
-      //   3. Link card: JSON with { text, embedUrl, embedTitle, embedDescription }
-      const content = message?.content?.text || "";
-      if (!content) {
-        elizaLogger.warn(`[BLUESKY-PLUGIN] postBluesky: no content to post`);
-        if (callback) {
-          callback({
-            text: `Post cycle: no content provided`,
-            content: { posted: 0, threadPostCount: 0 },
-          });
-        }
-        return;
-      }
+      // ---------------------------------------------------------------
+      // STEP 1: Get post content
+      // Priority: 1. Action queue (script-written) > 2. Message text (LLM)
+      // ---------------------------------------------------------------
+      let content = "";
+      let isThread = false;
 
-      // Check if this is thread content
-      const THREAD_SEPARATOR = "---THREAD_SEPARATOR---";
-      const segments = content.split(THREAD_SEPARATOR).map((s) => s.trim()).filter(Boolean);
-      const isThread = segments.length > 1;
+      const queuedPost = popQueuedPost();
+      if (queuedPost) {
+        // Content came from action queue — script prepared it directly
+        content = queuedPost.content;
+        isThread = queuedPost.type === "thread";
+        elizaLogger.info(
+          `[BLUESKY-PLUGIN] postBluesky: using queued post content (${content.length} chars)`
+        );
+      } else {
+        // Fallback: Parse content from message text (LLM response)
+        // Note: ElizaOS processActions() with Fix 5 forwards the LLM's
+        // response content to the action handler. The LLM response text
+        // SHOULD be the actual post content (see character.json prompt).
+        let rawContent = message?.content?.text || "";
+        // Sanitize: strip instruction prefixes that may leak from dispatch flow
+        rawContent = rawContent.replace(/^\[(SCOUT|ANALYST|INVESTIGATOR)\s+DELIVERY\].*?\n/, "");
+        rawContent = rawContent.replace(/^Execute the POST_BLUESKY action\..*/i, "");
+        rawContent = rawContent.replace(/^(Create|Make|Write|Generate|Compose)\s+a\s+Bluesky\s+post\b.*/i, "");
+        rawContent = rawContent.replace(/^(Post|Publish|Send)\s+(a\s+|to\s+)?Bluesky\b.*/i, "");
+        content = rawContent.trim() || message?.content?.text || "";
+        if (!content) {
+          elizaLogger.warn(`[BLUESKY-PLUGIN] postBluesky: no content to post`);
+          if (callback) {
+            callback({
+              text: `Post cycle: no content provided`,
+              content: { posted: 0, threadPostCount: 0 },
+            });
+          }
+          return;
+        }
+
+        // Check if this is thread content
+        const THREAD_SEPARATOR = "---THREAD_SEPARATOR---";
+        const segments = content.split(THREAD_SEPARATOR).map((s) => s.trim()).filter(Boolean);
+        isThread = segments.length > 1;
+      }
 
       // Check if this is a link card
       let isLinkCard = false;
@@ -179,6 +238,8 @@ export const postBlueskyAction: Action = {
 
       // Determine how many posts to create
       const remaining = config.maxPerDay - postState.todayCount;
+      const THREAD_SEPARATOR = "---THREAD_SEPARATOR---";
+      const segments = content.split(THREAD_SEPARATOR).map((s) => s.trim()).filter(Boolean);
       const postsToCreate = isThread
         ? Math.min(segments.length, config.maxThreadPosts, remaining)
         : Math.min(1, remaining);
@@ -236,7 +297,8 @@ export const postBlueskyAction: Action = {
         }
       } else if (isLinkCard) {
         // Link card post
-        const text = JSON.parse(content).text.substring(0, 300);
+        const linkCardContent: any = JSON.parse(content);
+        const text = linkCardContent.text.substring(0, 300);
         const result = await createPost(text, { embed: linkEmbed });
         if (result) {
           posted++;
@@ -259,7 +321,7 @@ export const postBlueskyAction: Action = {
       // Update state
       postState.todayCount += posted;
       postState.lastPostAt = new Date().toISOString();
-      saveState(STATE_FILE, postState);
+      savePostState(postState);
 
       const duration = Date.now() - startTime;
       elizaLogger.info(
